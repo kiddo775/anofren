@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Anofren v0.1.3</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script type="module">
+    import * as NostrTools from "https://esm.sh/nostr-tools@2.10.4";
+
+    // Стабильные релеи на март 2026 (из nostr.watch + github)
+    const relays = [
+      "wss://relay.nostr.band",
+      "wss://purplepag.es",
+      "wss://nostr.mom",
+      "wss://nostr-relay.wlvs.space",
+      "wss://filter.nostr.wine",
+      "wss://nostr-pub.wellorder.net",
+      "wss://relay.nostr.ro",
+      "wss://nostr.bitcoiner.social",
+      "wss://relay.ryzizub.com",  // ближе к РФ
+      "wss://nostr-relay.digitalmob.ro"
+    ];
+
+    let privKey, pubKey, npub, pool;
+    let currentChatNpub = null;
+    let messages = [];
+    let lang = "ru";
+
+    async function initKeys() {
+      const saved = localStorage.getItem("anofren_priv");
+      if (saved) {
+        privKey = NostrTools.nip19.decode(saved).data;
+      } else {
+        privKey = NostrTools.generateSecretKey();
+        localStorage.setItem("anofren_priv", NostrTools.nip19.nsecEncode(privKey));
+      }
+      pubKey = NostrTools.getPublicKey(privKey);
+      npub = NostrTools.nip19.npubEncode(pubKey);
+      document.getElementById("npub").textContent = npub;
+    }
+
+    function connectPool() {
+      pool = new NostrTools.SimplePool({
+        enablePing: true,
+        pingInterval: 20000,
+        enableReconnect: true
+      });
+
+      // Логируем каждый релей
+      relays.forEach(r => {
+        const ws = new WebSocket(r);
+        ws.onopen = () => console.log(`[РЕЛЕЙ OK] ${r} подключён`);
+        ws.onerror = (e) => console.error(`[РЕЛЕЙ ОШИБКА] ${r}`, e);
+        ws.onclose = (e) => console.log(`[РЕЛЕЙ ЗАКРЫТ] ${r} код: ${e.code}`);
+      });
+    }
+
+    async function sendDM(toNpub, content) {
+      try {
+        const toPub = NostrTools.nip19.decode(toNpub).data;
+        const encrypted = await NostrTools.nip04.encrypt(privKey, toPub, content);
+        const event = {
+          kind: 4,
+          created_at: Math.floor(Date.now() / 1000),
+          tags: [["p", toPub]],
+          content: encrypted
+        };
+        const signed = await NostrTools.finalizeEvent(event, privKey);
+        await pool.publish(relays, signed);
+        console.log(`[ОПУБЛИКОВАНО DM] на ${relays.length} релеях`);
+        addMessage("me", content);
+      } catch (e) {
+        console.error("[ОШИБКА ОТПРАВКИ DM]", e);
+        alert("Ошибка отправки: " + e.message);
+      }
+    }
+
+    function subscribe() {
+      pool.subscribeMany(relays, [{ kinds: [4], "#p": [pubKey] }], {
+        onevent: async (event) => {
+          console.log("[ПРИШЛО СОБЫТИЕ kind=4]", event.id.substring(0,10) + "... от " + event.pubkey.substring(0,10));
+          try {
+            const fromPub = event.pubkey;
+            const decrypted = await NostrTools.nip04.decrypt(privKey, fromPub, event.content);
+            if (currentChatNpub && NostrTools.nip19.decode(currentChatNpub).data === fromPub) {
+              addMessage("them", decrypted);
+              console.log("[РАСШИФРОВАНО И ПОКАЗАНО]", decrypted);
+            } else {
+              console.log("[DM ОТ ДРУГОГО]", decrypted);
+            }
+          } catch (err) {
+            console.error("[ОШИБКА РАСШИФРОВКИ]", err);
+          }
+        },
+        oneose: () => console.log("[EOSE] Подписка на DM готова — ждём сообщений")
+      });
+    }
+
+    function addMessage(who, text) {
+      messages.push({ who, text, time: new Date().toLocaleTimeString() });
+      renderMessages();
+    }
+
+    function renderMessages() {
+      document.getElementById("messages").innerHTML = messages.map(m => `
+        <div class="${m.who === 'me' ? 'text-right' : ''} mb-3">
+          <div class="inline-block max-w-[80%] p-3 rounded-2xl ${m.who === 'me' ? 'bg-indigo-600 text-white' : 'bg-zinc-800 text-white'}">
+            ${m.text}
+            <div class="text-xs opacity-70 mt-1">${m.time}</div>
+          </div>
+        </div>
+      `).join('');
+      document.getElementById("messages").scrollTop = document.getElementById("messages").scrollHeight;
+    }
+
+    window.onload = async () => {
+      await initKeys();
+      connectPool();
+      subscribe();
+
+      document.getElementById("sendDmBtn").onclick = () => {
+        const to = document.getElementById("friendNpub").value.trim();
+        const txt = document.getElementById("dmInput").value.trim();
+        if (to && txt) {
+          currentChatNpub = to;
+          sendDM(to, txt);
+          document.getElementById("dmInput").value = "";
+        }
+      };
+
+      // Кнопка теста связи
+      document.getElementById("testConnBtn").onclick = () => {
+        console.log("[ТЕСТ] Проверяю релеи...");
+        alert("Смотри консоль (F12) — там статус релеев и EOSE");
+      };
+    };
+  </script>
+</head>
+<body class="bg-zinc-950 text-zinc-100 min-h-screen font-sans p-4">
+  <div class="max-w-4xl mx-auto">
+    <h1 class="text-4xl font-bold text-indigo-400 mb-6">Anofren v0.1.3</h1>
+
+    <div class="bg-zinc-900 rounded-3xl p-6 mb-6">
+      <h2 class="text-xl mb-3">👤 Твой профиль</h2>
+      <p class="opacity-70 mb-2">npub (поделись с другом):</p>
+      <div id="npub" class="font-mono bg-black p-4 rounded-2xl break-all text-indigo-300 text-sm"></div>
+    </div>
+
+    <div class="flex gap-4 mb-6">
+      <button onclick="document.getElementById('dmTab').classList.remove('hidden')" class="flex-1 py-4 bg-zinc-800 rounded-2xl">🔒 Приватный чат</button>
+      <button id="testConnBtn" class="px-6 py-4 bg-zinc-700 rounded-2xl">Тест связи (F12)</button>
+    </div>
+
+    <div id="dmTab" class="bg-zinc-900 rounded-3xl p-6 hidden">
+      <input id="friendNpub" placeholder="npub друга (npub1...)" class="w-full bg-zinc-950 p-4 rounded-2xl mb-4 font-mono text-sm">
+      <div id="messages" class="h-80 overflow-y-auto bg-zinc-950 p-4 rounded-2xl mb-4"></div>
+      <div class="flex gap-2">
+        <input id="dmInput" placeholder="Сообщение..." class="flex-1 bg-zinc-950 p-4 rounded-2xl">
+        <button id="sendDmBtn" class="px-8 bg-indigo-600 rounded-2xl">→</button>
+      </div>
+    </div>
+
+    <p class="text-center text-xs opacity-50 mt-8">v0.1.3 • Открой F12 → Console для логов</p>
+  </div>
+</body>
+</html>
